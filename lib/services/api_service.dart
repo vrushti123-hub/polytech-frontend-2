@@ -5,7 +5,7 @@ import '../models/models.dart';
 
 class ApiService {
   static const String _apiUrlOverride = String.fromEnvironment('API_BASE_URL');
-  static const String baseUrl = 'http://localhost:3000/api';
+  static const String baseUrl = 'https://polytech-backend.onrender.com/api';
 
   // ── Token ─────────────────────────────────────────────────
   static Future<void> saveToken(String token) async {
