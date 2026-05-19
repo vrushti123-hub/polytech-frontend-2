@@ -9,10 +9,12 @@ void main() {
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
   ]);
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.light,
-  ));
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.light,
+    ),
+  );
   runApp(const PolytechApp());
 }
 
@@ -25,6 +27,7 @@ class PolytechApp extends StatelessWidget {
       title: 'Swami Polytech ERP',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
+      routes: {'/login': (_) => const LoginScreen()},
       home: const LoginScreen(),
     );
   }

@@ -117,6 +117,7 @@ class _RMHomeState extends State<RMHome> with SingleTickerProviderStateMixin {
                   .toList(),
             ),
           ),
+          const AppLogoutButton(),
           const SizedBox(width: 4),
         ],
         bottom: TabBar(

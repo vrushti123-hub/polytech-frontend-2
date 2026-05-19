@@ -9,6 +9,8 @@ class ApiService {
     defaultValue: 'http://localhost:3000/api',
   );
   static String? lastError;
+  static final Map<String, OrderStatus> _localOrderStatuses = {};
+  static final Map<String, Challan> _localChallans = {};
   // ── Token ─────────────────────────────────────────────────
   static Future<void> saveToken(String token) async {
     final prefs = await SharedPreferences.getInstance();
@@ -77,6 +79,10 @@ class ApiService {
       if (res.statusCode == 200) {
         final List<dynamic> data = jsonDecode(res.body);
         final orders = data.map((o) => _parseOrder(o)).toList();
+        for (final order in orders) {
+          final localStatus = _localOrderStatuses[order.id];
+          if (localStatus != null) order.status = localStatus;
+        }
         if (distributorId != null) {
           return orders.where((o) => o.distributorId == distributorId).toList();
         }
@@ -124,14 +130,25 @@ class ApiService {
   }
 
   static Future<bool> updateOrderStatus(String orderId, String status) async {
+    final localStatus = _parseOrderStatus(status);
     try {
       final res = await http.patch(
         Uri.parse('$baseUrl/orders/$orderId/status'),
         headers: await _headers(),
         body: jsonEncode({'status': status}),
       );
-      return res.statusCode == 200;
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        _localOrderStatuses[orderId] = localStatus;
+        return true;
+      }
+      if (status == 'dispatched') {
+        _localOrderStatuses[orderId] = localStatus;
+      }
+      return false;
     } catch (e) {
+      if (status == 'dispatched') {
+        _localOrderStatuses[orderId] = localStatus;
+      }
       return false;
     }
   }
@@ -548,11 +565,16 @@ class ApiService {
       );
       if (res.statusCode == 200) {
         final List<dynamic> data = jsonDecode(res.body);
-        return data.map((c) => _parseChallan(c)).toList();
+        final challansById = {
+          for (final challan in data.map((c) => _parseChallan(c)))
+            challan.id: challan,
+        };
+        challansById.addAll(_localChallans);
+        return challansById.values.toList();
       }
-      return [];
+      return _localChallans.values.toList();
     } catch (e) {
-      return [];
+      return _localChallans.values.toList();
     }
   }
 
@@ -579,12 +601,18 @@ class ApiService {
                   'brand': i.brand,
                   'color': i.color,
                   'quantity': i.quantity,
+                  'dispatched_qty': i.quantity,
                 },
               )
               .toList(),
         }),
       );
-      return res.statusCode == 201;
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        _localChallans[challan.id] = challan;
+        _localOrderStatuses[challan.orderId] = OrderStatus.dispatched;
+        return true;
+      }
+      return false;
     } catch (e) {
       return false;
     }

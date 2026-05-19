@@ -113,6 +113,7 @@ class _ProductionHomeState extends State<ProductionHome>
                     .toList(),
               ),
             ),
+          const AppLogoutButton(),
           const SizedBox(width: 4),
         ],
         bottom: TabBar(

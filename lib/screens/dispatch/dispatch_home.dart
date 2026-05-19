@@ -22,6 +22,8 @@ class _DispatchHomeState extends State<DispatchHome>
     with SingleTickerProviderStateMixin {
   late TabController _tabCtrl;
   List<Order> _orders = [];
+  List<Challan> _challans = [];
+  final Set<String> _completedOrderIds = {};
   bool _loading = true;
   int _refreshKey = 0;
 
@@ -39,10 +41,19 @@ class _DispatchHomeState extends State<DispatchHome>
 
   Future<void> _loadOrders() async {
     setState(() => _loading = true);
-    final orders = await ApiService.getOrders();
+    final ordersFuture = ApiService.getOrders();
+    final challansFuture = ApiService.getChallans();
+    final orders = await ordersFuture;
+    final challans = await challansFuture;
     if (mounted) {
       setState(() {
+        for (final order in orders) {
+          if (_completedOrderIds.contains(order.id)) {
+            order.status = OrderStatus.dispatched;
+          }
+        }
         _orders = orders;
+        _challans = challans;
         _loading = false;
         _refreshKey++;
       });
@@ -52,9 +63,47 @@ class _DispatchHomeState extends State<DispatchHome>
   List<Order> get _pendingNotifications => _orders
       .where(
         (o) =>
-            o.status == OrderStatus.pending || o.status == OrderStatus.partial,
+            !_isDone(o) &&
+            (o.status == OrderStatus.pending ||
+                o.status == OrderStatus.partial),
       )
       .toList();
+
+  bool _isDone(Order order) {
+    return _completedOrderIds.contains(order.id) ||
+        order.status == OrderStatus.dispatched;
+  }
+
+  DateTime _doneSortDate(Order order) {
+    final orderChallans = _challans
+        .where((challan) => challan.orderId == order.id)
+        .toList();
+    if (orderChallans.isEmpty) return order.orderDate;
+    return orderChallans
+        .map((challan) => challan.dispatchDate)
+        .reduce((latest, date) => date.isAfter(latest) ? date : latest);
+  }
+
+  void _handleDispatchComplete(Order order, Challan challan) {
+    setState(() {
+      if (order.status == OrderStatus.dispatched) {
+        _completedOrderIds.add(order.id);
+      } else {
+        _completedOrderIds.remove(order.id);
+      }
+      final index = _orders.indexWhere((existing) => existing.id == order.id);
+      order.status = OrderStatus.dispatched;
+      if (index != -1) {
+        _orders[index] = order;
+      } else {
+        _orders.add(order);
+      }
+      _challans.removeWhere((existing) => existing.id == challan.id);
+      _challans.add(challan);
+      _refreshKey++;
+    });
+    _tabCtrl.animateTo(order.status == OrderStatus.dispatched ? 2 : 1);
+  }
 
   void _showNotifications() {
     showNotificationSheet(
@@ -71,13 +120,19 @@ class _DispatchHomeState extends State<DispatchHome>
               color: order.status == OrderStatus.partial
                   ? AppTheme.warningAmber
                   : AppTheme.primaryBlue,
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) =>
-                      DispatchOrderDetail(order: order, onUpdate: _loadOrders),
-                ),
-              ),
+              onTap: () async {
+                final challan = await Navigator.push<Challan>(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => DispatchOrderDetail(
+                      order: order,
+                      onUpdate: _loadOrders,
+                      onDispatchComplete: _handleDispatchComplete,
+                    ),
+                  ),
+                );
+                if (challan != null) _handleDispatchComplete(order, challan);
+              },
             ),
           )
           .toList(),
@@ -92,19 +147,19 @@ class _DispatchHomeState extends State<DispatchHome>
 
   @override
   Widget build(BuildContext context) {
-    final pending = _orders
+    final pending =
+        _orders.where((o) => o.status == OrderStatus.pending).toList()
+          ..sort((a, b) => b.orderDate.compareTo(a.orderDate));
+    final approved = _orders
         .where(
           (o) =>
-              o.status == OrderStatus.pending ||
-              o.status == OrderStatus.partial,
+              !_isDone(o) &&
+              (o.status == OrderStatus.approved ||
+                  o.status == OrderStatus.partial),
         )
         .toList();
-    final approved = _orders
-        .where((o) => o.status == OrderStatus.approved)
-        .toList();
-    final dispatched = _orders
-        .where((o) => o.status == OrderStatus.dispatched)
-        .toList();
+    final dispatched = _orders.where(_isDone).toList()
+      ..sort((a, b) => _doneSortDate(b).compareTo(_doneSortDate(a)));
 
     return Scaffold(
       backgroundColor: AppTheme.surfaceWhite,
@@ -125,6 +180,7 @@ class _DispatchHomeState extends State<DispatchHome>
         ),
         actions: [
           NotificationButton(count: pending.length, onTap: _showNotifications),
+          const AppLogoutButton(),
           const SizedBox(width: 4),
         ],
         bottom: TabBar(
@@ -145,23 +201,26 @@ class _DispatchHomeState extends State<DispatchHome>
           : TabBarView(
               controller: _tabCtrl,
               children: [
-                _OrderList(
+                _PendingDistributorList(
                   key: ValueKey(_refreshKey),
                   orders: pending,
-                  showActions: true,
                   onRefresh: _loadOrders,
+                  onDispatchComplete: _handleDispatchComplete,
                 ),
                 _OrderList(
                   key: ValueKey(_refreshKey + 100),
                   orders: approved,
                   showActions: true,
                   onRefresh: _loadOrders,
+                  onDispatchComplete: _handleDispatchComplete,
                 ),
                 _OrderList(
                   key: ValueKey(_refreshKey + 200),
                   orders: dispatched,
+                  challans: _challans,
                   showActions: false,
                   onRefresh: _loadOrders,
+                  onDispatchComplete: _handleDispatchComplete,
                 ),
               ],
             ),
@@ -171,15 +230,39 @@ class _DispatchHomeState extends State<DispatchHome>
 
 class _OrderList extends StatelessWidget {
   final List<Order> orders;
+  final List<Challan> challans;
   final bool showActions;
   final VoidCallback onRefresh;
+  final void Function(Order order, Challan challan)? onDispatchComplete;
 
   const _OrderList({
     super.key,
     required this.orders,
+    this.challans = const [],
     required this.showActions,
     required this.onRefresh,
+    this.onDispatchComplete,
   });
+
+  List<Challan> _challansForOrder(String orderId) =>
+      challans.where((challan) => challan.orderId == orderId).toList();
+
+  int? _dispatchedPiecesFor(Order order) {
+    final orderChallans = _challansForOrder(order.id);
+    if (orderChallans.isEmpty) return null;
+    return orderChallans.fold<int>(
+      0,
+      (sum, challan) => sum + challan.totalPieces,
+    );
+  }
+
+  DateTime? _lastDispatchDateFor(Order order) {
+    final orderChallans = _challansForOrder(order.id);
+    if (orderChallans.isEmpty) return null;
+    return orderChallans
+        .map((challan) => challan.dispatchDate)
+        .reduce((latest, date) => date.isAfter(latest) ? date : latest);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -195,14 +278,271 @@ class _OrderList extends StatelessWidget {
       child: ListView.builder(
         padding: const EdgeInsets.all(16),
         itemCount: orders.length,
-        itemBuilder: (_, i) => OrderCard(
-          order: orders[i],
+        itemBuilder: (_, i) {
+          final order = orders[i];
+          return OrderCard(
+            order: order,
+            dispatchedPieces: _dispatchedPiecesFor(order),
+            dispatchDate: _lastDispatchDateFor(order),
+            onTap: () async {
+              final challan = await Navigator.push<Challan>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => DispatchOrderDetail(
+                    order: order,
+                    onUpdate: onRefresh,
+                    onDispatchComplete: onDispatchComplete,
+                  ),
+                ),
+              );
+              if (challan != null) {
+                onDispatchComplete?.call(order, challan);
+              }
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _PendingDistributorList extends StatelessWidget {
+  final List<Order> orders;
+  final VoidCallback onRefresh;
+  final void Function(Order order, Challan challan)? onDispatchComplete;
+
+  const _PendingDistributorList({
+    super.key,
+    required this.orders,
+    required this.onRefresh,
+    this.onDispatchComplete,
+  });
+
+  List<_DistributorOrderGroup> get _groups {
+    final grouped = <String, List<Order>>{};
+    for (final order in orders) {
+      grouped.putIfAbsent(order.distributorId, () => []).add(order);
+    }
+
+    final groups = grouped.entries.map((entry) {
+      final distributorOrders = entry.value
+        ..sort((a, b) => b.orderDate.compareTo(a.orderDate));
+      return _DistributorOrderGroup(
+        distributorId: entry.key,
+        distributorName: distributorOrders.first.distributorName,
+        distributorCity: distributorOrders.first.distributorCity,
+        orders: distributorOrders,
+      );
+    }).toList();
+
+    groups.sort((a, b) => b.latestOrderDate.compareTo(a.latestOrderDate));
+    return groups;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (orders.isEmpty) {
+      return const EmptyState(
+        icon: Icons.inbox_rounded,
+        title: 'No Pending Orders',
+        subtitle: 'Distributor orders will appear here',
+      );
+    }
+
+    final groups = _groups;
+    return RefreshIndicator(
+      onRefresh: () async => onRefresh(),
+      child: ListView.builder(
+        padding: const EdgeInsets.all(16),
+        itemCount: groups.length,
+        itemBuilder: (_, i) => _DistributorGroupCard(
+          group: groups[i],
           onTap: () => Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (_) =>
-                  DispatchOrderDetail(order: orders[i], onUpdate: onRefresh),
+              builder: (_) => _DistributorOrdersScreen(
+                group: groups[i],
+                onRefresh: onRefresh,
+                onDispatchComplete: onDispatchComplete,
+              ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DistributorOrderGroup {
+  final String distributorId;
+  final String distributorName;
+  final String distributorCity;
+  final List<Order> orders;
+
+  const _DistributorOrderGroup({
+    required this.distributorId,
+    required this.distributorName,
+    required this.distributorCity,
+    required this.orders,
+  });
+
+  DateTime get latestOrderDate => orders
+      .map((order) => order.orderDate)
+      .reduce((latest, date) => date.isAfter(latest) ? date : latest);
+
+  int get totalPieces =>
+      orders.fold(0, (sum, order) => sum + order.totalPieces);
+  int get partialCount =>
+      orders.where((order) => order.status == OrderStatus.partial).length;
+}
+
+class _DistributorGroupCard extends StatelessWidget {
+  final _DistributorOrderGroup group;
+  final VoidCallback onTap;
+
+  const _DistributorGroupCard({required this.group, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final fmt = DateFormat('dd MMM, hh:mm a');
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AppTheme.cardWhite,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppTheme.borderGrey),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.04),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: AppTheme.chipBg,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(
+                Icons.storefront_rounded,
+                color: AppTheme.primaryBlue,
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    group.distributorName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                      color: AppTheme.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${group.distributorCity} • ${group.orders.length} orders • ${group.totalPieces} pcs',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppTheme.textSecondary,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Latest ${fmt.format(group.latestOrderDate)}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: AppTheme.textLight,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (group.partialCount > 0) ...[
+              StatusBadge(label: '${group.partialCount} Partial'),
+              const SizedBox(width: 8),
+            ],
+            const Icon(
+              Icons.chevron_right_rounded,
+              color: AppTheme.textSecondary,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DistributorOrdersScreen extends StatelessWidget {
+  final _DistributorOrderGroup group;
+  final VoidCallback onRefresh;
+  final void Function(Order order, Challan challan)? onDispatchComplete;
+
+  const _DistributorOrdersScreen({
+    required this.group,
+    required this.onRefresh,
+    this.onDispatchComplete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppTheme.surfaceWhite,
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(group.distributorName),
+            Text(
+              '${group.distributorCity} • ${group.orders.length} pending',
+              style: const TextStyle(
+                fontSize: 12,
+                color: Color(0xFF94A3B8),
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+          ],
+        ),
+        actions: const [AppLogoutButton()],
+      ),
+      body: RefreshIndicator(
+        onRefresh: () async => onRefresh(),
+        child: ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: group.orders.length,
+          itemBuilder: (_, i) => OrderCard(
+            order: group.orders[i],
+            onTap: () async {
+              final order = group.orders[i];
+              final challan = await Navigator.push<Challan>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => DispatchOrderDetail(
+                    order: order,
+                    onUpdate: onRefresh,
+                    onDispatchComplete: onDispatchComplete,
+                  ),
+                ),
+              );
+              if (challan != null) {
+                onDispatchComplete?.call(order, challan);
+              }
+            },
           ),
         ),
       ),
@@ -214,11 +554,13 @@ class _OrderList extends StatelessWidget {
 class DispatchOrderDetail extends StatefulWidget {
   final Order order;
   final VoidCallback onUpdate;
+  final void Function(Order order, Challan challan)? onDispatchComplete;
 
   const DispatchOrderDetail({
     super.key,
     required this.order,
     required this.onUpdate,
+    this.onDispatchComplete,
   });
 
   @override
@@ -269,19 +611,31 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
     }
   }
 
-  void _generateChallan() {
-    Navigator.push(
+  void _applyCompletedChallan(Challan challan) {
+    setState(() {
+      widget.order.status = OrderStatus.dispatched;
+      _orderChallans.removeWhere((existing) => existing.id == challan.id);
+      _orderChallans.add(challan);
+    });
+    widget.onDispatchComplete?.call(widget.order, challan);
+  }
+
+  Future<void> _generateChallan() async {
+    final challan = await Navigator.push<Challan>(
       context,
       MaterialPageRoute(
         builder: (_) => ChallanScreen(
           order: widget.order,
-          onDispatched: () {
-            widget.onUpdate();
-            Navigator.pop(context);
+          onCreated: (challan) {
+            if (mounted) _applyCompletedChallan(challan);
           },
         ),
       ),
     );
+    if (challan == null || !mounted) return;
+
+    _applyCompletedChallan(challan);
+    if (mounted) Navigator.pop(context, challan);
   }
 
   Future<void> _approveOrder() async {
@@ -374,6 +728,54 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
     return 'image/jpeg';
   }
 
+  bool _sameItem(OrderItem a, OrderItem b) {
+    return a.productId == b.productId &&
+        a.brand.toLowerCase() == b.brand.toLowerCase() &&
+        a.color.toLowerCase() == b.color.toLowerCase();
+  }
+
+  List<_ItemDispatchEntry> _dispatchesForItem(OrderItem item) {
+    final entries = <_ItemDispatchEntry>[];
+    for (final challan in _orderChallans) {
+      final qty = challan.items
+          .where((challanItem) => _sameItem(challanItem, item))
+          .fold(0, (sum, challanItem) => sum + challanItem.quantity);
+      if (qty > 0) {
+        entries.add(
+          _ItemDispatchEntry(
+            challanId: challan.id,
+            quantity: qty,
+            dispatchDate: challan.dispatchDate,
+          ),
+        );
+      }
+    }
+    return entries;
+  }
+
+  int _dispatchedQtyFor(OrderItem item) {
+    final challanQty = _dispatchesForItem(
+      item,
+    ).fold(0, (sum, entry) => sum + entry.quantity);
+    return challanQty > 0 ? challanQty : item.dispatchedQty;
+  }
+
+  int get _totalDispatchedPieces {
+    final challanQty = _orderChallans.fold(
+      0,
+      (sum, challan) => sum + challan.totalPieces,
+    );
+    if (challanQty > 0) return challanQty;
+    return widget.order.items.fold(0, (sum, item) => sum + item.dispatchedQty);
+  }
+
+  DateTime? get _lastDispatchAt {
+    if (_orderChallans.isEmpty) return null;
+    return _orderChallans
+        .map((challan) => challan.dispatchDate)
+        .reduce((latest, date) => date.isAfter(latest) ? date : latest);
+  }
+
   @override
   Widget build(BuildContext context) {
     final o = widget.order;
@@ -395,7 +797,7 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
     final fmt = DateFormat('dd MMM yyyy, hh:mm a');
 
     return Scaffold(
-      appBar: AppBar(title: Text(o.id)),
+      appBar: AppBar(title: Text(o.id), actions: const [AppLogoutButton()]),
       body: _checkingStock
           ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
@@ -419,7 +821,7 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
                           width: 48,
                           height: 48,
                           decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.15),
+                            color: Colors.white.withValues(alpha: 0.15),
                             borderRadius: BorderRadius.circular(12),
                           ),
                           child: const Icon(
@@ -469,7 +871,13 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
                     const SizedBox(height: 6),
                   ],
 
-                  ...o.items.map((item) => _DispatchItemCard(item: item)),
+                  ...o.items.map(
+                    (item) => _DispatchItemCard(
+                      item: item,
+                      dispatchedQty: _dispatchedQtyFor(item),
+                      dispatches: _dispatchesForItem(item),
+                    ),
+                  ),
                   const SizedBox(height: 16),
 
                   Container(
@@ -481,7 +889,20 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
                     ),
                     child: Column(
                       children: [
-                        _SummaryRow('Total Pieces', '${o.totalPieces} pcs'),
+                        _SummaryRow('Order Received', '${o.totalPieces} pcs'),
+                        const SizedBox(height: 6),
+                        _SummaryRow(
+                          'Final Dispatched',
+                          '$_totalDispatchedPieces pcs',
+                          valueColor: AppTheme.successGreen,
+                        ),
+                        if (_lastDispatchAt != null) ...[
+                          const SizedBox(height: 6),
+                          _SummaryRow(
+                            'Last Dispatch',
+                            fmt.format(_lastDispatchAt!),
+                          ),
+                        ],
                         const SizedBox(height: 6),
                         _SummaryRow(
                           'Stock Status',
@@ -505,7 +926,7 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
                           color: AppTheme.lightAmber,
                           borderRadius: BorderRadius.circular(10),
                           border: Border.all(
-                            color: AppTheme.warningAmber.withOpacity(0.4),
+                            color: AppTheme.warningAmber.withValues(alpha: 0.4),
                           ),
                         ),
                         child: const Row(
@@ -555,7 +976,7 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
                           color: AppTheme.lightAmber,
                           borderRadius: BorderRadius.circular(10),
                           border: Border.all(
-                            color: AppTheme.warningAmber.withOpacity(0.4),
+                            color: AppTheme.warningAmber.withValues(alpha: 0.4),
                           ),
                         ),
                         child: const Row(
@@ -689,10 +1110,19 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
 
 class _DispatchItemCard extends StatelessWidget {
   final OrderItem item;
-  const _DispatchItemCard({required this.item});
+  final int dispatchedQty;
+  final List<_ItemDispatchEntry> dispatches;
+
+  const _DispatchItemCard({
+    required this.item,
+    required this.dispatchedQty,
+    required this.dispatches,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final fmt = DateFormat('dd MMM yyyy, hh:mm a');
+    final hasDispatch = dispatchedQty > 0;
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(14),
@@ -701,8 +1131,8 @@ class _DispatchItemCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
         border: Border.all(
           color: item.stockAvailable
-              ? AppTheme.successGreen.withOpacity(0.3)
-              : AppTheme.dangerRed.withOpacity(0.3),
+              ? AppTheme.successGreen.withValues(alpha: 0.3)
+              : AppTheme.dangerRed.withValues(alpha: 0.3),
         ),
       ),
       child: Row(
@@ -749,23 +1179,24 @@ class _DispatchItemCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  item.dispatchedQty > 0
-                      ? 'Dispatched: ${item.dispatchedQty} / ${item.quantity} pcs'
-                      : '${item.quantity} pcs',
+                  hasDispatch
+                      ? 'Ordered: ${item.quantity} pcs • Final dispatched: $dispatchedQty pcs'
+                      : 'Ordered: ${item.quantity} pcs',
                   style: TextStyle(
                     fontWeight: FontWeight.w600,
                     fontSize: 13,
-                    color: item.dispatchedQty > 0
+                    color: hasDispatch
                         ? AppTheme.warningAmber
                         : AppTheme.textSecondary,
                   ),
                 ),
-                if (item.dispatchHistory.isNotEmpty)
+                if (dispatches.isNotEmpty)
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
-                    children: List.generate(item.dispatchHistory.length, (i) {
+                    children: List.generate(dispatches.length, (i) {
+                      final dispatch = dispatches[i];
                       return Text(
-                        'Dispatch ${i + 1} → ${item.dispatchHistory[i]} pcs',
+                        '${dispatch.challanId} • ${fmt.format(dispatch.dispatchDate)} → ${dispatch.quantity} pcs',
                         style: const TextStyle(
                           fontSize: 11,
                           color: AppTheme.textSecondary,
@@ -780,7 +1211,7 @@ class _DispatchItemCard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Text(
-                '${item.quantity} pcs',
+                hasDispatch ? '$dispatchedQty pcs' : '${item.quantity} pcs',
                 style: const TextStyle(
                   fontWeight: FontWeight.w800,
                   fontSize: 14,
@@ -794,6 +1225,18 @@ class _DispatchItemCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ItemDispatchEntry {
+  final String challanId;
+  final int quantity;
+  final DateTime dispatchDate;
+
+  const _ItemDispatchEntry({
+    required this.challanId,
+    required this.quantity,
+    required this.dispatchDate,
+  });
 }
 
 class _DispatchTruckPhotoCard extends StatelessWidget {
@@ -1013,9 +1456,9 @@ class _VariantChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.08),
+        color: color.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: color.withOpacity(0.22)),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1068,31 +1511,65 @@ class _SummaryRow extends StatelessWidget {
 // ── Challan Generation Screen ─────────────────────────────────
 class ChallanScreen extends StatefulWidget {
   final Order order;
-  final VoidCallback onDispatched;
+  final ValueChanged<Challan>? onCreated;
 
-  const ChallanScreen({
-    super.key,
-    required this.order,
-    required this.onDispatched,
-  });
+  const ChallanScreen({super.key, required this.order, this.onCreated});
 
   @override
   State<ChallanScreen> createState() => _ChallanScreenState();
 }
 
 class _ChallanScreenState extends State<ChallanScreen> {
-  final _partialQtyCtrl = TextEditingController();
   final _vehicleCtrl = TextEditingController();
   final _driverCtrl = TextEditingController();
   final _phoneCtrl = TextEditingController();
   final _formKey = GlobalKey<FormState>();
   final _imagePicker = ImagePicker();
+  final Map<OrderItem, TextEditingController> _qtyCtrls = {};
+  final Map<OrderItem, bool> _selectedItems = {};
   Uint8List? _truckPhotoBytes;
   String? _truckPhotoDataUrl;
   String? _truckPhotoName;
   bool _saving = false;
 
   bool get _photoUploaded => _truckPhotoDataUrl != null;
+
+  @override
+  void initState() {
+    super.initState();
+    for (final item in widget.order.items) {
+      final initialQty = item.pendingQty > 0 ? item.pendingQty : 0;
+      _qtyCtrls[item] = TextEditingController(text: '$initialQty');
+      _selectedItems[item] = initialQty > 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final ctrl in _qtyCtrls.values) {
+      ctrl.dispose();
+    }
+    _vehicleCtrl.dispose();
+    _driverCtrl.dispose();
+    _phoneCtrl.dispose();
+    super.dispose();
+  }
+
+  int? _enteredQtyFor(OrderItem item) {
+    final text = _qtyCtrls[item]?.text.trim() ?? '';
+    if (text.isEmpty) return null;
+    return int.tryParse(text);
+  }
+
+  int get _challanTotal {
+    var total = 0;
+    for (final item in widget.order.items) {
+      if (_selectedItems[item] != true) continue;
+      final enteredQty = _enteredQtyFor(item);
+      total += enteredQty ?? (item.pendingQty > 0 ? item.pendingQty : 0);
+    }
+    return total;
+  }
 
   Future<void> _pickTruckPhoto(ImageSource source) async {
     try {
@@ -1166,16 +1643,28 @@ class _ChallanScreenState extends State<ChallanScreen> {
       return;
     }
 
-    final enteredQty = int.tryParse(_partialQtyCtrl.text.trim());
-    if (_partialQtyCtrl.text.trim().isNotEmpty &&
-        (enteredQty == null || enteredQty <= 0)) {
+    if (!_selectedItems.values.any((selected) => selected)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Enter valid dispatch quantity'),
+          content: Text('Select at least one product to dispatch'),
           backgroundColor: AppTheme.warningAmber,
         ),
       );
       return;
+    }
+
+    for (final item in widget.order.items) {
+      if (_selectedItems[item] != true) continue;
+      final enteredQty = _enteredQtyFor(item);
+      if (enteredQty == null || enteredQty < 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Enter 0 or more pcs for ${item.productName}'),
+            backgroundColor: AppTheme.warningAmber,
+          ),
+        );
+        return;
+      }
     }
 
     setState(() => _saving = true);
@@ -1183,12 +1672,10 @@ class _ChallanScreenState extends State<ChallanScreen> {
     final challanItems = <OrderItem>[];
 
     for (final item in widget.order.items) {
-      final remaining = item.pendingQty;
-      if (remaining <= 0) continue;
-
-      final dispatchQty = enteredQty == null
-          ? remaining
-          : enteredQty.clamp(1, remaining);
+      if (_selectedItems[item] != true) continue;
+      final defaultQty = item.pendingQty > 0 ? item.pendingQty : 0;
+      final dispatchQty = _enteredQtyFor(item) ?? defaultQty;
+      if (dispatchQty == 0) continue;
       item.dispatchedQty += dispatchQty;
       item.dispatchHistory.add(dispatchQty);
       challanItems.add(
@@ -1216,11 +1703,13 @@ class _ChallanScreenState extends State<ChallanScreen> {
       return;
     }
 
-    final isPartial = widget.order.items.any((item) => item.pendingQty > 0);
-    final newStatus = isPartial ? 'partial' : 'dispatched';
-    widget.order.status = isPartial
-        ? OrderStatus.partial
-        : OrderStatus.dispatched;
+    final isFullyDispatched = widget.order.items.every(
+      (item) => item.dispatchedQty >= item.quantity,
+    );
+    final newStatus = isFullyDispatched ? 'dispatched' : 'partial';
+    widget.order.status = isFullyDispatched
+        ? OrderStatus.dispatched
+        : OrderStatus.partial;
 
     final challanId =
         'CHL-${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}';
@@ -1251,7 +1740,19 @@ class _ChallanScreenState extends State<ChallanScreen> {
       return;
     }
 
-    await ApiService.updateOrderStatus(widget.order.id, newStatus);
+    final statusUpdated = await ApiService.updateOrderStatus(
+      widget.order.id,
+      newStatus,
+    );
+    if (!statusUpdated && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Challan saved. Order will appear in Done.'),
+          backgroundColor: AppTheme.warningAmber,
+        ),
+      );
+    }
+    widget.onCreated?.call(challan);
 
     setState(() => _saving = false);
 
@@ -1295,8 +1796,7 @@ class _ChallanScreenState extends State<ChallanScreen> {
           TextButton(
             onPressed: () {
               Navigator.of(context).pop();
-              Navigator.pop(context);
-              widget.onDispatched();
+              Navigator.pop(context, challan);
             },
             child: const Text('Done'),
           ),
@@ -1312,7 +1812,10 @@ class _ChallanScreenState extends State<ChallanScreen> {
     final fmt = DateFormat('dd MMM yyyy');
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Generate Challan')),
+      appBar: AppBar(
+        title: const Text('Generate Challan'),
+        actions: const [AppLogoutButton()],
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Form(
@@ -1413,6 +1916,14 @@ class _ChallanScreenState extends State<ChallanScreen> {
                         ),
                         child: Row(
                           children: [
+                            Checkbox(
+                              value: _selectedItems[item] ?? false,
+                              onChanged: (value) {
+                                setState(() {
+                                  _selectedItems[item] = value ?? false;
+                                });
+                              },
+                            ),
                             Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1434,11 +1945,28 @@ class _ChallanScreenState extends State<ChallanScreen> {
                                 ],
                               ),
                             ),
-                            Text(
-                              '${item.quantity}',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w800,
-                                fontSize: 14,
+                            SizedBox(
+                              width: 92,
+                              child: TextFormField(
+                                controller: _qtyCtrls[item],
+                                enabled: _selectedItems[item] == true,
+                                textAlign: TextAlign.right,
+                                keyboardType: TextInputType.number,
+                                inputFormatters: [
+                                  FilteringTextInputFormatter.digitsOnly,
+                                ],
+                                decoration: InputDecoration(
+                                  isDense: true,
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 10,
+                                  ),
+                                  suffixText: 'pcs',
+                                  hintText: '0',
+                                  helperText: 'Pending ${item.pendingQty}',
+                                  helperMaxLines: 1,
+                                ),
+                                onChanged: (_) => setState(() {}),
                               ),
                             ),
                           ],
@@ -1459,7 +1987,7 @@ class _ChallanScreenState extends State<ChallanScreen> {
                             ),
                           ),
                           Text(
-                            '${widget.order.totalPieces} pcs',
+                            '$_challanTotal pcs',
                             style: const TextStyle(
                               fontWeight: FontWeight.w800,
                               fontSize: 14,
@@ -1509,17 +2037,6 @@ class _ChallanScreenState extends State<ChallanScreen> {
                   decoration: const InputDecoration(hintText: '9876500000'),
                   validator: (v) =>
                       (v?.length ?? 0) < 10 ? 'Enter valid phone' : null,
-                ),
-              ),
-              const SizedBox(height: 14),
-              FormFieldWrapper(
-                label: 'Dispatch Quantity (Optional)',
-                child: TextFormField(
-                  controller: _partialQtyCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    hintText: 'Leave empty for full dispatch',
-                  ),
                 ),
               ),
               const SizedBox(height: 20),

@@ -139,6 +139,7 @@ class _OwnerDashboardState extends State<OwnerDashboard> {
               count: _pendingOrdersCount,
               onTap: _showNotifications,
             ),
+          const AppLogoutButton(),
           const SizedBox(width: 4),
         ],
       ),
@@ -745,7 +746,7 @@ class _OwnerOrderDetail extends StatelessWidget {
         order.status.name.substring(1);
 
     return Scaffold(
-      appBar: AppBar(title: Text(order.id)),
+      appBar: AppBar(title: Text(order.id), actions: const [AppLogoutButton()]),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -1213,7 +1214,10 @@ class _DistributorOrdersScreen extends StatelessWidget {
         .length;
 
     return Scaffold(
-      appBar: AppBar(title: Text(distributor.name)),
+      appBar: AppBar(
+        title: Text(distributor.name),
+        actions: const [AppLogoutButton()],
+      ),
       body: orders.isEmpty
           ? const EmptyState(
               icon: Icons.receipt_long_outlined,

@@ -1,7 +1,29 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import '../theme/app_theme.dart';
 import '../models/models.dart';
+import '../services/api_service.dart';
 import '../utils/catalog_image_resolver.dart';
+
+// ── Logout ───────────────────────────────────────────────────
+class AppLogoutButton extends StatelessWidget {
+  const AppLogoutButton({super.key});
+
+  Future<void> _logout(BuildContext context) async {
+    await ApiService.clearToken();
+    if (!context.mounted) return;
+    Navigator.of(context).pushNamedAndRemoveUntil('/login', (_) => false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: 'Logout',
+      icon: const Icon(Icons.logout_rounded),
+      onPressed: () => _logout(context),
+    );
+  }
+}
 
 // ── Status Badge ─────────────────────────────────────────────
 class StatusBadge extends StatelessWidget {
@@ -186,12 +208,16 @@ class OrderCard extends StatelessWidget {
   final Order order;
   final VoidCallback? onTap;
   final bool showActions;
+  final int? dispatchedPieces;
+  final DateTime? dispatchDate;
 
   const OrderCard({
     super.key,
     required this.order,
     this.onTap,
     this.showActions = false,
+    this.dispatchedPieces,
+    this.dispatchDate,
   });
 
   @override
@@ -199,6 +225,13 @@ class OrderCard extends StatelessWidget {
     final statusLabel =
         order.status.name.substring(0, 1).toUpperCase() +
         order.status.name.substring(1);
+    final orderMeta = '${order.distributorCity} • ${order.id}';
+    final subtitle = dispatchDate == null
+        ? orderMeta
+        : '$orderMeta • ${DateFormat('dd MMM yyyy, hh:mm a').format(dispatchDate!)}';
+    final piecesLabel = dispatchedPieces == null
+        ? '${order.totalPieces} pcs'
+        : '$dispatchedPieces pcs dispatched';
 
     return GestureDetector(
       onTap: onTap,
@@ -242,7 +275,9 @@ class OrderCard extends StatelessWidget {
                           ),
                         ),
                         Text(
-                          '${order.distributorCity} • ${order.id}',
+                          subtitle,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             fontSize: 12,
                             color: AppTheme.textSecondary,
@@ -268,7 +303,7 @@ class OrderCard extends StatelessWidget {
                 children: [
                   ...order.items.take(3).map(_itemThumb),
                   if (order.items.isNotEmpty) const SizedBox(width: 10),
-                  _pill(Icons.inventory_2_outlined, '${order.totalPieces} pcs'),
+                  _pill(Icons.inventory_2_outlined, piecesLabel),
                   const SizedBox(width: 10),
                   _pill(Icons.layers_outlined, '${order.items.length} items'),
                   const Spacer(),
