@@ -9,7 +9,16 @@ import '../rawmaterial/rm_home.dart';
 
 // ── Production Home ───────────────────────────────────────────
 class ProductionHome extends StatefulWidget {
-  const ProductionHome({super.key});
+  final String? initialProductId;
+  final String? initialBrand;
+  final String? initialColor;
+
+  const ProductionHome({
+    super.key,
+    this.initialProductId,
+    this.initialBrand,
+    this.initialColor,
+  });
 
   @override
   State<ProductionHome> createState() => _ProductionHomeState();
@@ -29,6 +38,7 @@ class _ProductionHomeState extends State<ProductionHome>
   void initState() {
     super.initState();
     _tabCtrl = TabController(length: 2, vsync: this);
+    if (widget.initialProductId != null) _tabCtrl.index = 1;
     _tabCtrl.addListener(() {
       if (!_tabCtrl.indexIsChanging) _loadAll();
     });
@@ -113,7 +123,6 @@ class _ProductionHomeState extends State<ProductionHome>
                     .toList(),
               ),
             ),
-          const AppLogoutButton(),
           const SizedBox(width: 4),
         ],
         bottom: TabBar(
@@ -175,6 +184,9 @@ class _ProductionHomeState extends State<ProductionHome>
                         entries: _entries,
                         inventory: _inventory,
                         products: _products,
+                        initialProductId: widget.initialProductId,
+                        initialBrand: widget.initialBrand,
+                        initialColor: widget.initialColor,
                         onSaved: _loadAll,
                       ),
                     ],
@@ -335,6 +347,74 @@ class _TaskBoardTabState extends State<_TaskBoardTab> {
       return {product.brand: product.colors};
     }
 
+    Future<Product?> showProductPicker() {
+      final searchCtrl = TextEditingController();
+      var filtered = List<Product>.from(sortedProducts);
+      return showDialog<Product>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setSearchState) {
+            void filter(String value) {
+              final query = value.trim().toLowerCase();
+              setSearchState(() {
+                if (query.isEmpty) {
+                  filtered = List<Product>.from(sortedProducts);
+                } else {
+                  final starts = sortedProducts.where(
+                    (product) => product.name.toLowerCase().startsWith(query),
+                  );
+                  final contains = sortedProducts.where(
+                    (product) =>
+                        !product.name.toLowerCase().startsWith(query) &&
+                        product.name.toLowerCase().contains(query),
+                  );
+                  filtered = [...starts, ...contains];
+                }
+              });
+            }
+
+            return AlertDialog(
+              title: const Text('Select Product'),
+              content: SizedBox(
+                width: 420,
+                height: 420,
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: searchCtrl,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        hintText: 'Type product name',
+                        prefixIcon: Icon(Icons.search),
+                      ),
+                      onChanged: filter,
+                    ),
+                    const SizedBox(height: 12),
+                    Expanded(
+                      child: filtered.isEmpty
+                          ? const Center(child: Text('No products found'))
+                          : ListView.builder(
+                              itemCount: filtered.length,
+                              itemBuilder: (context, index) {
+                                final product = filtered[index];
+                                return ListTile(
+                                  title: Text(product.name),
+                                  subtitle: Text(product.brand),
+                                  onTap: () =>
+                                      Navigator.pop(dialogContext, product),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      ).whenComplete(searchCtrl.dispose);
+    }
+
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -355,28 +435,31 @@ class _TaskBoardTabState extends State<_TaskBoardTab> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    DropdownButtonFormField<Product>(
-                      value: selectedProduct,
-                      hint: const Text('Select product'),
-                      items: sortedProducts
-                          .map(
-                            (product) => DropdownMenuItem(
-                              value: product,
-                              child: Text(
-                                '${product.name} (${product.brand})',
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (product) => setDState(() {
-                        selectedProduct = product;
-                        selectedBrand = product?.brandOptions.isNotEmpty == true
-                            ? product!.brandOptions.keys.first
-                            : product?.brand;
-                        selectedColor = null;
-                      }),
-                      validator: (value) => value == null ? 'Required' : null,
+                    TextFormField(
+                      readOnly: true,
+                      controller: TextEditingController(
+                        text: selectedProduct == null
+                            ? ''
+                            : '${selectedProduct!.name} (${selectedProduct!.brand})',
+                      ),
+                      decoration: const InputDecoration(
+                        hintText: 'Select product',
+                        prefixIcon: Icon(Icons.search),
+                        suffixIcon: Icon(Icons.arrow_drop_down),
+                      ),
+                      onTap: () async {
+                        final product = await showProductPicker();
+                        if (product == null) return;
+                        setDState(() {
+                          selectedProduct = product;
+                          selectedBrand = product.brandOptions.isNotEmpty
+                              ? product.brandOptions.keys.first
+                              : product.brand;
+                          selectedColor = null;
+                        });
+                      },
+                      validator: (_) =>
+                          selectedProduct == null ? 'Required' : null,
                     ),
                     const SizedBox(height: 12),
                     DropdownButtonFormField<String>(
@@ -772,6 +855,9 @@ class _ProductionEntryTab extends StatefulWidget {
   final List<ProductionEntry> entries;
   final List<InventoryItem> inventory;
   final List<Product> products;
+  final String? initialProductId;
+  final String? initialBrand;
+  final String? initialColor;
   final VoidCallback onSaved;
 
   const _ProductionEntryTab({
@@ -779,6 +865,9 @@ class _ProductionEntryTab extends StatefulWidget {
     required this.entries,
     required this.inventory,
     required this.products,
+    this.initialProductId,
+    this.initialBrand,
+    this.initialColor,
     required this.onSaved,
   });
 
@@ -796,6 +885,40 @@ class _ProductionEntryTabState extends State<_ProductionEntryTab> {
   final _rejectedCtrl = TextEditingController(text: '0');
   final _mixedCtrl = TextEditingController(text: '0');
   bool _saving = false;
+  bool _initialApplied = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _applyInitialSelection();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ProductionEntryTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _applyInitialSelection();
+  }
+
+  void _applyInitialSelection() {
+    if (_initialApplied || widget.initialProductId == null) return;
+    for (final product in widget.products) {
+      if (product.id == widget.initialProductId) {
+        _selectedProduct = product;
+        final options = _brandOptionsFor(product);
+        _selectedBrand = options.containsKey(widget.initialBrand)
+            ? widget.initialBrand
+            : (options.keys.isEmpty ? null : options.keys.first);
+        final colors = _selectedBrand == null
+            ? const <String>[]
+            : options[_selectedBrand] ?? const <String>[];
+        _selectedColor = colors.contains(widget.initialColor)
+            ? widget.initialColor
+            : null;
+        _initialApplied = true;
+        break;
+      }
+    }
+  }
 
   int get _produced => int.tryParse(_producedCtrl.text) ?? 0;
   int get _rejected => int.tryParse(_rejectedCtrl.text) ?? 0;
@@ -829,6 +952,78 @@ class _ProductionEntryTabState extends State<_ProductionEntryTab> {
       }
     }
     return null;
+  }
+
+  Future<Product?> _showProductSearchPicker(List<Product> products) {
+    final searchCtrl = TextEditingController();
+    var filtered = List<Product>.from(products);
+    return showDialog<Product>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDState) {
+          void applyFilter(String value) {
+            final query = value.trim().toLowerCase();
+            setDState(() {
+              if (query.isEmpty) {
+                filtered = List<Product>.from(products);
+              } else {
+                final starts = products.where(
+                  (product) => product.name.toLowerCase().startsWith(query),
+                );
+                final contains = products.where(
+                  (product) =>
+                      !product.name.toLowerCase().startsWith(query) &&
+                      product.name.toLowerCase().contains(query),
+                );
+                filtered = [...starts, ...contains];
+              }
+            });
+          }
+
+          return AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+            title: const Text('Select Product'),
+            content: SizedBox(
+              width: 420,
+              height: 420,
+              child: Column(
+                children: [
+                  TextField(
+                    controller: searchCtrl,
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      hintText: 'Type product name',
+                      prefixIcon: Icon(Icons.search),
+                    ),
+                    onChanged: applyFilter,
+                  ),
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: filtered.isEmpty
+                        ? const Center(child: Text('No products found'))
+                        : ListView.builder(
+                            itemCount: filtered.length,
+                            itemBuilder: (context, index) {
+                              final product = filtered[index];
+                              return ListTile(
+                                dense: true,
+                                title: Text(product.name),
+                                subtitle: Text(product.brand),
+                                onTap: () =>
+                                    Navigator.pop(dialogContext, product),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    ).whenComplete(searchCtrl.dispose);
   }
 
   String _qtyLabel(double value, String unit) {
@@ -999,6 +1194,10 @@ class _ProductionEntryTabState extends State<_ProductionEntryTab> {
           backgroundColor: AppTheme.successGreen,
         ),
       );
+      if (widget.initialProductId != null) {
+        Navigator.pop(context, true);
+        return;
+      }
       setState(() {
         _selectedProduct = null;
         _selectedBrand = null;
@@ -1081,36 +1280,34 @@ class _ProductionEntryTabState extends State<_ProductionEntryTab> {
                         validator: (v) => v == null ? 'Required' : null,
                       ),
                       const SizedBox(height: 12),
-                      DropdownButtonFormField<Product>(
-                        value: selectedProduct,
+                      TextFormField(
+                        readOnly: true,
+                        controller: TextEditingController(
+                          text: selectedProduct?.name ?? '',
+                        ),
                         decoration: const InputDecoration(
                           labelText: 'Product',
-                          prefixIcon: Icon(Icons.chair_outlined),
+                          prefixIcon: Icon(Icons.search),
+                          suffixIcon: Icon(Icons.arrow_drop_down),
                         ),
-                        items: products
-                            .map(
-                              (product) => DropdownMenuItem(
-                                value: product,
-                                child: Text(
-                                  product.name,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            )
-                            .toList(),
-                        onChanged: saving
+                        onTap: saving
                             ? null
-                            : (product) => setDState(() {
-                                selectedProduct = product;
-                                final options = product == null
-                                    ? <String, List<String>>{}
-                                    : _brandOptionsFor(product);
-                                selectedBrand = options.keys.isEmpty
-                                    ? null
-                                    : options.keys.first;
-                                selectedColor = null;
-                              }),
-                        validator: (v) => v == null ? 'Required' : null,
+                            : () async {
+                                final product = await _showProductSearchPicker(
+                                  products,
+                                );
+                                if (product == null) return;
+                                setDState(() {
+                                  selectedProduct = product;
+                                  final options = _brandOptionsFor(product);
+                                  selectedBrand = options.keys.isEmpty
+                                      ? null
+                                      : options.keys.first;
+                                  selectedColor = null;
+                                });
+                              },
+                        validator: (_) =>
+                            selectedProduct == null ? 'Required' : null,
                       ),
                       const SizedBox(height: 12),
                       DropdownButtonFormField<String>(
@@ -1460,49 +1657,28 @@ class _ProductionEntryTabState extends State<_ProductionEntryTab> {
               ),
             ),
             const SizedBox(height: 8),
-            DropdownButtonFormField<Product>(
-              value: _selectedProduct,
-              hint: const Text('Select product'),
-              items: sortedProducts.map((p) {
-                return DropdownMenuItem<Product>(
-                  value: p,
-                  child: Text(
-                    '${p.name} (${p.brand})',
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                );
-              }).toList(),
-              onChanged: (v) => setState(() {
-                _selectedProduct = v;
-                _selectedBrand = v?.brandOptions.isNotEmpty == true
-                    ? v!.brandOptions.keys.first
-                    : v?.brand;
-                _selectedColor = null;
-              }),
-              decoration: InputDecoration(
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 14,
-                ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppTheme.borderGrey),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppTheme.borderGrey),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(
-                    color: AppTheme.primaryBlue,
-                    width: 2,
-                  ),
-                ),
-                filled: true,
-                fillColor: Colors.white,
+            TextFormField(
+              readOnly: true,
+              controller: TextEditingController(
+                text: _selectedProduct?.name ?? '',
               ),
-              validator: (v) => v == null ? 'Required' : null,
+              decoration: const InputDecoration(
+                hintText: 'Select product',
+                prefixIcon: Icon(Icons.search),
+                suffixIcon: Icon(Icons.arrow_drop_down),
+              ),
+              onTap: () async {
+                final product = await _showProductSearchPicker(sortedProducts);
+                if (product == null) return;
+                setState(() {
+                  _selectedProduct = product;
+                  _selectedBrand = product.brandOptions.isNotEmpty
+                      ? product.brandOptions.keys.first
+                      : product.brand;
+                  _selectedColor = null;
+                });
+              },
+              validator: (_) => _selectedProduct == null ? 'Required' : null,
             ),
             const SizedBox(height: 14),
 

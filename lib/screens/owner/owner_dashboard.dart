@@ -1534,6 +1534,20 @@ class _InventoryTabState extends State<_InventoryTab> {
     return totals;
   }
 
+  Map<String, DateTime> get _latestProductionByItem {
+    final latest = <String, DateTime>{};
+    for (final entry in widget.entries) {
+      if (entry.netQty <= 0) continue;
+
+      final key = _inventoryKey(entry.productId, entry.brand, entry.color);
+      final current = latest[key];
+      if (current == null || entry.date.isAfter(current)) {
+        latest[key] = entry.date;
+      }
+    }
+    return latest;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -1642,6 +1656,7 @@ class _InventoryTabState extends State<_InventoryTab> {
                     inventory: widget.inventory,
                     todayDispatchByItem: _todayDispatchByItem,
                     todayProductionByItem: _todayProductionByItem,
+                    latestProductionByItem: _latestProductionByItem,
                   )
                 : _RawMaterialsList(rawMaterials: widget.rawMaterials),
           ),
@@ -1658,11 +1673,13 @@ class _FinishedGoodsList extends StatelessWidget {
   final List<InventoryItem> inventory;
   final Map<String, int> todayDispatchByItem;
   final Map<String, int> todayProductionByItem;
+  final Map<String, DateTime> latestProductionByItem;
 
   const _FinishedGoodsList({
     required this.inventory,
     required this.todayDispatchByItem,
     required this.todayProductionByItem,
+    required this.latestProductionByItem,
   });
 
   @override
@@ -1677,26 +1694,23 @@ class _FinishedGoodsList extends StatelessWidget {
 
     final sortedInventory = List<InventoryItem>.from(inventory)
       ..sort((a, b) {
-        final aMinus =
-            todayDispatchByItem[_inventoryKey(a.productId, a.brand, a.color)] ??
-            0;
-        final bMinus =
-            todayDispatchByItem[_inventoryKey(b.productId, b.brand, b.color)] ??
-            0;
-        final aPlus =
-            todayProductionByItem[_inventoryKey(
-              a.productId,
-              a.brand,
-              a.color,
-            )] ??
-            0;
-        final bPlus =
-            todayProductionByItem[_inventoryKey(
-              b.productId,
-              b.brand,
-              b.color,
-            )] ??
-            0;
+        final aKey = _inventoryKey(a.productId, a.brand, a.color);
+        final bKey = _inventoryKey(b.productId, b.brand, b.color);
+        final aLatestProduction = latestProductionByItem[aKey];
+        final bLatestProduction = latestProductionByItem[bKey];
+
+        if (aLatestProduction != null || bLatestProduction != null) {
+          if (aLatestProduction == null) return 1;
+          if (bLatestProduction == null) return -1;
+
+          final recentCompare = bLatestProduction.compareTo(aLatestProduction);
+          if (recentCompare != 0) return recentCompare;
+        }
+
+        final aMinus = todayDispatchByItem[aKey] ?? 0;
+        final bMinus = todayDispatchByItem[bKey] ?? 0;
+        final aPlus = todayProductionByItem[aKey] ?? 0;
+        final bPlus = todayProductionByItem[bKey] ?? 0;
         final aMovement = aMinus + aPlus;
         final bMovement = bMinus + bPlus;
         if (aMovement != bMovement) return bMovement.compareTo(aMovement);

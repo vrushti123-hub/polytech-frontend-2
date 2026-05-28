@@ -17,6 +17,67 @@ class ApiService {
     await prefs.setString('jwt_token', token);
   }
 
+  static Future<void> saveCurrentUser(User user) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      'current_user',
+      jsonEncode({
+        'id': user.id,
+        'name': user.name,
+        'mobile': user.mobile,
+        'role': user.role.name,
+        'username': user.username,
+      }),
+    );
+  }
+
+  static Future<User?> getSavedUser() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('current_user');
+    if (raw == null) return _userFromSavedToken(prefs);
+    try {
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+      return User(
+        id: data['id'] ?? '',
+        name: data['name'] ?? '',
+        mobile: data['mobile'] ?? '',
+        role: _parseUserRole(data['role'] ?? ''),
+        username: data['username'] ?? '',
+        password: '',
+      );
+    } catch (_) {
+      return _userFromSavedToken(prefs);
+    }
+  }
+
+  static User? _userFromSavedToken(SharedPreferences prefs) {
+    final token = prefs.getString('jwt_token');
+    if (token == null) return null;
+    try {
+      final parts = token.split('.');
+      if (parts.length < 2) return null;
+      final payload = utf8.decode(
+        base64Url.decode(base64Url.normalize(parts[1])),
+      );
+      final data = jsonDecode(payload) as Map<String, dynamic>;
+      final nestedUser = data['user'];
+      final user = nestedUser is Map<String, dynamic> ? nestedUser : data;
+      final id = '${user['id'] ?? user['sub'] ?? ''}';
+      final role = '${user['role'] ?? ''}';
+      if (id.isEmpty || role.isEmpty) return null;
+      return User(
+        id: id,
+        name: '${user['name'] ?? user['username'] ?? role}',
+        mobile: '${user['mobile'] ?? ''}',
+        role: _parseUserRole(role),
+        username: '${user['username'] ?? ''}',
+        password: '',
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   static Future<String?> getToken() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString('jwt_token');
@@ -25,6 +86,7 @@ class ApiService {
   static Future<void> clearToken() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('jwt_token');
+    await prefs.remove('current_user');
   }
 
   static Future<Map<String, String>> _headers() async {
@@ -609,7 +671,6 @@ class ApiService {
       );
       if (res.statusCode >= 200 && res.statusCode < 300) {
         _localChallans[challan.id] = challan;
-        _localOrderStatuses[challan.orderId] = OrderStatus.dispatched;
         return true;
       }
       return false;
@@ -628,7 +689,14 @@ class ApiService {
         headers: await _headers(),
         body: jsonEncode({'truck_photo_url': truckPhotoUrl}),
       );
-      return res.statusCode == 200;
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        final local = _localChallans[challanId];
+        if (local != null) {
+          local.truckPhotoUrl = truckPhotoUrl;
+        }
+        return true;
+      }
+      return false;
     } catch (e) {
       return false;
     }

@@ -114,6 +114,7 @@ class _LoginScreenState extends State<LoginScreen>
       username: userData['username'],
       password: '',
     );
+    await ApiService.saveCurrentUser(user);
 
     Navigator.pushReplacement(
       context,

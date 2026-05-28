@@ -137,14 +137,22 @@ class _CatalogTab extends StatefulWidget {
 
 class _CatalogTabState extends State<_CatalogTab> {
   String? _selectedCategory;
+  final _searchCtrl = TextEditingController();
   final _svc = MockDataService(); // images ke liye mock fallback
   List<Product> _products = [];
+  String _searchQuery = '';
   bool _loading = true;
 
   @override
   void initState() {
     super.initState();
     _loadProducts();
+  }
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
   }
 
   Future<void> _loadProducts() async {
@@ -211,6 +219,24 @@ class _CatalogTabState extends State<_CatalogTab> {
     return value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '');
   }
 
+  bool _productMatchesSearch(Product product, String query) {
+    final normalizedQuery = _norm(query);
+    if (normalizedQuery.isEmpty) return true;
+
+    final searchableValues = <String>[
+      product.name,
+      product.category,
+      product.brand,
+      ...product.colors,
+      ...product.brandOptions.keys,
+      ...product.brandOptions.values.expand((colors) => colors),
+    ];
+
+    return searchableValues.any(
+      (value) => _norm(value).contains(normalizedQuery),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) return const Center(child: CircularProgressIndicator());
@@ -220,7 +246,9 @@ class _CatalogTabState extends State<_CatalogTab> {
       if (_selectedCategory != null && p.category != _selectedCategory) {
         return false;
       }
-      return p.isActive;
+      if (!p.isActive) return false;
+      if (_searchQuery.isEmpty) return true;
+      return _productMatchesSearch(p, _searchQuery);
     }).toList();
 
     return Column(
@@ -229,24 +257,49 @@ class _CatalogTabState extends State<_CatalogTab> {
           color: Colors.white,
           child: Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  _CategoryChip(
-                    label: 'All',
-                    selected: _selectedCategory == null,
-                    onTap: () => setState(() => _selectedCategory = null),
+            child: Column(
+              children: [
+                TextField(
+                  controller: _searchCtrl,
+                  textInputAction: TextInputAction.search,
+                  decoration: InputDecoration(
+                    hintText: 'Search products',
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: _searchQuery.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: 'Clear search',
+                            icon: const Icon(Icons.close),
+                            onPressed: () {
+                              _searchCtrl.clear();
+                              setState(() => _searchQuery = '');
+                            },
+                          ),
                   ),
-                  ...categories.map(
-                    (c) => _CategoryChip(
-                      label: c,
-                      selected: _selectedCategory == c,
-                      onTap: () => setState(() => _selectedCategory = c),
-                    ),
+                  onChanged: (value) =>
+                      setState(() => _searchQuery = value.trim()),
+                ),
+                const SizedBox(height: 12),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      _CategoryChip(
+                        label: 'All',
+                        selected: _selectedCategory == null,
+                        onTap: () => setState(() => _selectedCategory = null),
+                      ),
+                      ...categories.map(
+                        (c) => _CategoryChip(
+                          label: c,
+                          selected: _selectedCategory == c,
+                          onTap: () => setState(() => _selectedCategory = c),
+                        ),
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),
@@ -269,7 +322,7 @@ class _CatalogTabState extends State<_CatalogTab> {
                     crossAxisCount: 2,
                     crossAxisSpacing: 12,
                     mainAxisSpacing: 12,
-                    mainAxisExtent: 720,
+                    mainAxisExtent: 260,
                   ),
                   itemCount: products.length,
                   itemBuilder: (_, i) => _ProductCard(
@@ -347,17 +400,19 @@ class _ProductCard extends StatefulWidget {
 }
 
 class _ProductCardState extends State<_ProductCard> {
-  late String _selectedBrand;
-  final Set<String> _selectedColors = {};
-  final Map<String, TextEditingController> _qtyCtrls = {};
-  bool _saving = false;
-  final TextEditingController _remarksCtrl = TextEditingController();
+  @override
+  Widget build(BuildContext context) {
+    return widget.compact ? _buildCompactCard() : _buildListCard();
+  }
 
-  List<String> get _displayBrands {
-    if (widget.product.brandOptions.isNotEmpty) {
-      return widget.product.brandOptions.keys.toList();
-    }
-    return [widget.product.brand];
+  void _openDetails() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+            ProductDetailScreen(product: widget.product, user: widget.user),
+      ),
+    );
   }
 
   Map<String, List<String>> get _brandOptions {
@@ -367,203 +422,63 @@ class _ProductCardState extends State<_ProductCard> {
     return {widget.product.brand: widget.product.colors};
   }
 
-  List<String> get _availableColors {
-    return _brandOptions[_selectedBrand] ?? widget.product.colors;
-  }
-
-  String get _variantSummary {
-    final brandCount = _displayBrands.length;
-    final colorCount = _availableColors.length;
-    return '$brandCount brand${brandCount == 1 ? '' : 's'} • $colorCount color${colorCount == 1 ? '' : 's'}';
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _selectedBrand = _displayBrands.first;
-    _syncQuantityControllers();
-  }
-
-  @override
-  void dispose() {
-    for (final controller in _qtyCtrls.values) {
-      controller.dispose();
-    }
-    _remarksCtrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return widget.compact ? _buildCompactCard() : _buildListCard();
-  }
-
-  void _syncQuantityControllers() {
-    final activeColors = _availableColors.toSet();
-    for (final color in activeColors) {
-      _qtyCtrls.putIfAbsent(color, () => TextEditingController());
-    }
-
-    final staleColors = _qtyCtrls.keys
-        .where((color) => !activeColors.contains(color))
-        .toList();
-    for (final color in staleColors) {
-      _qtyCtrls.remove(color)?.dispose();
-      _selectedColors.remove(color);
-    }
-  }
-
-  int _qtyForColor(String color) {
-    return int.tryParse(_qtyCtrls[color]?.text ?? '') ?? 0;
-  }
-
-  int get _totalSelectedQty =>
-      _selectedColors.fold(0, (sum, color) => sum + _qtyForColor(color));
-
-  List<OrderItem> _selectedOrderItems() {
-    final items = <OrderItem>[];
-    for (final color in _availableColors) {
-      if (!_selectedColors.contains(color)) continue;
-      final qty = _qtyForColor(color);
-      if (qty <= 0) continue;
-      items.add(
-        OrderItem(
-          productId: widget.product.id,
-          productName: widget.product.name,
-          brand: _selectedBrand,
-          color: color,
-          quantity: qty,
-          stockAvailable: false,
-        ),
-      );
-    }
-    return items;
-  }
-
-  Future<void> _placeQuickOrder(BuildContext context) async {
-    final items = _selectedOrderItems();
-    if (items.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Select at least one color and enter quantity'),
-          backgroundColor: AppTheme.dangerRed,
-        ),
-      );
-      return;
-    }
-
-    setState(() => _saving = true);
-
-    final orderId =
-        'ORD-${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}';
-    final order = Order(
-      id: orderId,
-      distributorId: widget.user.id,
-      distributorName: widget.user.name,
-      distributorCity: 'Maharashtra',
-      orderDate: DateTime.now(),
-      status: OrderStatus.pending,
-      items: items,
-      remarks: _remarksCtrl.text.isEmpty ? null : _remarksCtrl.text,
-    );
-
-    final success = await ApiService.createOrder(order);
-    if (!mounted || !context.mounted) return;
-
-    setState(() {
-      _saving = false;
-      if (success) {
-        _selectedColors.clear();
-        _remarksCtrl.clear();
-        for (final controller in _qtyCtrls.values) {
-          controller.clear();
-        }
-      }
-    });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          success
-              ? 'Order placed for ${widget.product.name}'
-              : 'Unable to place order. Please try again.',
-        ),
-        backgroundColor: success ? AppTheme.successGreen : AppTheme.dangerRed,
-      ),
-    );
-  }
+  int get _totalColorCount =>
+      _brandOptions.values.fold(0, (sum, colors) => sum + colors.length);
 
   Widget _buildListCard() {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppTheme.cardWhite,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppTheme.borderGrey),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _productImage(width: 104, height: 104, cover: true),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _productHeader(),
-                const SizedBox(height: 12),
-                _brandSelector(),
-                const SizedBox(height: 12),
-                _colorQuantitySelector(maxHeight: 220),
-                const SizedBox(height: 12),
-                _remarksField(maxLines: 2),
-                const SizedBox(height: 12),
-                _orderFooter(),
-              ],
+    return InkWell(
+      onTap: _openDetails,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: AppTheme.cardWhite,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppTheme.borderGrey),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _productImage(width: 104, height: 104, cover: true),
+            const SizedBox(width: 14),
+            Expanded(child: _productHeader()),
+            const Icon(
+              Icons.chevron_right,
+              color: AppTheme.textSecondary,
+              size: 22,
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
   Widget _buildCompactCard() {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppTheme.cardWhite,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: AppTheme.borderGrey),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            height: 120,
-            width: double.infinity,
-            child: _productImage(width: double.infinity, height: 120),
-          ),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.all(10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _productHeader(compact: true),
-                  const SizedBox(height: 8),
-                  _brandSelector(compact: true),
-                  const SizedBox(height: 8),
-                  Expanded(child: _colorQuantitySelector(compact: true)),
-                  const SizedBox(height: 8),
-                  _remarksField(compact: true),
-                  const SizedBox(height: 8),
-                  _orderFooter(compact: true),
-                ],
-              ),
+    return InkWell(
+      onTap: _openDetails,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        decoration: BoxDecoration(
+          color: AppTheme.cardWhite,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: AppTheme.borderGrey),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              height: 150,
+              width: double.infinity,
+              child: _productImage(width: double.infinity, height: 150),
             ),
-          ),
-        ],
+            Padding(
+              padding: const EdgeInsets.all(10),
+              child: _productHeader(compact: true),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -608,278 +523,55 @@ class _ProductCardState extends State<_ProductCard> {
           maxLines: compact ? 2 : 1,
           overflow: TextOverflow.ellipsis,
           style: TextStyle(
-            fontSize: compact ? 13 : 15,
+            fontSize: compact ? 14 : 16,
             fontWeight: FontWeight.w800,
             color: AppTheme.textPrimary,
           ),
         ),
-        const SizedBox(height: 3),
+        const SizedBox(height: 4),
         Text(
-          '${widget.product.category} • $_variantSummary',
+          widget.product.category,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: TextStyle(
-            fontSize: compact ? 10 : 12,
+            fontSize: compact ? 11 : 12,
+            fontWeight: FontWeight.w600,
             color: AppTheme.textSecondary,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _brandSelector({bool compact = false}) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Brand',
-          style: TextStyle(
-            fontSize: compact ? 11 : 13,
-            fontWeight: FontWeight.w700,
-            color: AppTheme.textPrimary,
           ),
         ),
         const SizedBox(height: 6),
         Wrap(
           spacing: 6,
           runSpacing: 6,
-          children: _displayBrands
-              .map((brand) => _brandSelectionChip(brand, compact: compact))
-              .toList(),
+          children: [
+            _infoChip('${_brandOptions.length} brands', compact: compact),
+            _infoChip(
+              '$_totalColorCount color${_totalColorCount == 1 ? '' : 's'}',
+              compact: compact,
+            ),
+          ],
         ),
       ],
     );
   }
 
-  Widget _colorQuantitySelector({bool compact = false, double? maxHeight}) {
-    final content = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Colors & Quantity',
-          style: TextStyle(
-            fontSize: compact ? 11 : 13,
-            fontWeight: FontWeight.w700,
-            color: AppTheme.textPrimary,
-          ),
-        ),
-        const SizedBox(height: 6),
-        ..._availableColors.map((color) => _colorQuantityRow(color, compact)),
-      ],
-    );
-
-    if (maxHeight == null) {
-      return SingleChildScrollView(child: content);
-    }
-
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxHeight: maxHeight),
-      child: SingleChildScrollView(child: content),
-    );
-  }
-
-  Widget _colorQuantityRow(String color, bool compact) {
-    final selected = _selectedColors.contains(color);
-    final controller = _qtyCtrls[color] ??= TextEditingController();
+  Widget _infoChip(String label, {bool compact = false}) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 7),
       padding: EdgeInsets.symmetric(
-        horizontal: compact ? 6 : 8,
-        vertical: compact ? 6 : 8,
+        horizontal: compact ? 7 : 8,
+        vertical: compact ? 3 : 4,
       ),
       decoration: BoxDecoration(
-        color: selected ? AppTheme.chipBg : AppTheme.surfaceWhite,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: selected ? AppTheme.primaryBlue : AppTheme.borderGrey,
-        ),
+        color: AppTheme.chipBg,
+        borderRadius: BorderRadius.circular(7),
       ),
-      child: Row(
-        children: [
-          SizedBox(
-            width: compact ? 24 : 30,
-            height: compact ? 24 : 30,
-            child: Checkbox(
-              value: selected,
-              visualDensity: VisualDensity.compact,
-              onChanged: (value) {
-                setState(() {
-                  if (value == true) {
-                    _selectedColors.add(color);
-                    if (controller.text.trim().isEmpty) controller.text = '1';
-                  } else {
-                    _selectedColors.remove(color);
-                  }
-                });
-              },
-            ),
-          ),
-          _colorDot(color),
-          Expanded(
-            child: Text(
-              color,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: compact ? 11 : 12,
-                fontWeight: FontWeight.w700,
-                color: AppTheme.textPrimary,
-              ),
-            ),
-          ),
-          SizedBox(
-            width: compact ? 52 : 78,
-            height: compact ? 34 : 38,
-            child: TextFormField(
-              controller: controller,
-              enabled: selected,
-              textAlign: TextAlign.center,
-              keyboardType: TextInputType.number,
-              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              style: TextStyle(
-                fontSize: compact ? 12 : 13,
-                fontWeight: FontWeight.w800,
-              ),
-              decoration: const InputDecoration(
-                hintText: 'Qty',
-                contentPadding: EdgeInsets.symmetric(horizontal: 6),
-              ),
-              onChanged: (value) {
-                final qty = int.tryParse(value) ?? 0;
-                setState(() {
-                  if (qty > 0) {
-                    _selectedColors.add(color);
-                  } else {
-                    _selectedColors.remove(color);
-                  }
-                });
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _remarksField({bool compact = false, int maxLines = 1}) {
-    return FormFieldWrapper(
-      label: 'Remarks',
-      child: TextFormField(
-        controller: _remarksCtrl,
-        maxLines: maxLines,
-        style: TextStyle(fontSize: compact ? 12 : 13),
-        decoration: const InputDecoration(hintText: 'Optional'),
-      ),
-    );
-  }
-
-  Widget _orderFooter({bool compact = false}) {
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            _totalSelectedQty > 0
-                ? '${_selectedColors.length} color${_selectedColors.length == 1 ? '' : 's'} • $_totalSelectedQty pcs'
-                : 'Select colors',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: compact ? 11 : 12,
-              fontWeight: FontWeight.w700,
-              color: _totalSelectedQty > 0
-                  ? AppTheme.successGreen
-                  : AppTheme.textSecondary,
-            ),
-          ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: compact ? 10 : 11,
+          fontWeight: FontWeight.w700,
+          color: AppTheme.primaryBlue,
         ),
-        SizedBox(
-          height: compact ? 32 : 36,
-          child: ElevatedButton(
-            onPressed: _saving ? null : () => _placeQuickOrder(context),
-            child: _saving
-                ? SizedBox(
-                    width: compact ? 16 : 18,
-                    height: compact ? 16 : 18,
-                    child: const CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.white,
-                    ),
-                  )
-                : Text('Order', style: TextStyle(fontSize: compact ? 12 : 13)),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _brandSelectionChip(String brand, {bool compact = false}) {
-    final selected = _selectedBrand == brand;
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          _selectedBrand = brand;
-          _selectedColors.clear();
-          _syncQuantityControllers();
-        });
-      },
-      child: Container(
-        padding: EdgeInsets.symmetric(
-          horizontal: compact ? 8 : 12,
-          vertical: compact ? 6 : 8,
-        ),
-        decoration: BoxDecoration(
-          color: selected ? AppTheme.primaryBlue : AppTheme.surfaceWhite,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: selected ? AppTheme.primaryBlue : AppTheme.borderGrey,
-            width: selected ? 2 : 1,
-          ),
-        ),
-        child: Text(
-          brand,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: selected ? Colors.white : AppTheme.textPrimary,
-            fontSize: compact ? 10 : 12,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _colorDot(String colorName) {
-    final colorMap = {
-      'BLACK': const Color(0xFF1A1A1A),
-      'BEIGE': const Color(0xFFF5E6C8),
-      'BISCUIT': const Color(0xFFD6B58A),
-      'BLUE': const Color(0xFF2563EB),
-      'BROWN': const Color(0xFF92400E),
-      'COFFEE': const Color(0xFF6F4E37),
-      'COPPER': const Color(0xFFB87333),
-      'GREEN': const Color(0xFF16A34A),
-      'GREY': const Color(0xFF9CA3AF),
-      'LB': const Color(0xFF60A5FA),
-      'METALIC': const Color(0xFF94A3B8),
-      'ORANGE': const Color(0xFFF97316),
-      'ORANGEWOOD': const Color(0xFFC26A2E),
-      'PINK': const Color(0xFFEC4899),
-      'RED': const Color(0xFFDC2626),
-      'ROSEWOOD': const Color(0xFF7F1D1D),
-      'SANDALWOOD': const Color(0xFFE7C79B),
-      'SILVER': const Color(0xFFC0C0C0),
-      'WHITE': const Color(0xFFF8FAFC),
-      'YELLOW': const Color(0xFFD97706),
-    };
-    return Container(
-      width: 16,
-      height: 16,
-      margin: const EdgeInsets.only(right: 4),
-      decoration: BoxDecoration(
-        color: colorMap[colorName.toUpperCase()] ?? AppTheme.textSecondary,
-        shape: BoxShape.circle,
-        border: Border.all(color: AppTheme.borderGrey, width: 0.5),
       ),
     );
   }
@@ -915,10 +607,9 @@ class ProductDetailScreen extends StatefulWidget {
 }
 
 class _ProductDetailScreenState extends State<ProductDetailScreen> {
-  String? _selectedColor;
   String? _selectedBrand;
-  int _qty = 1;
-  final _qtyCtrl = TextEditingController(text: '1');
+  final Set<String> _selectedColors = {};
+  final Map<String, TextEditingController> _qtyCtrls = {};
   final _remarksCtrl = TextEditingController();
   bool _saving = false;
 
@@ -926,6 +617,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
   void initState() {
     super.initState();
     _selectedBrand = _brandOptions.keys.first;
+    _syncQuantityControllers();
   }
 
   Map<String, List<String>> get _brandOptions {
@@ -943,16 +635,61 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
 
   @override
   void dispose() {
-    _qtyCtrl.dispose();
+    for (final controller in _qtyCtrls.values) {
+      controller.dispose();
+    }
     _remarksCtrl.dispose();
     super.dispose();
   }
 
+  void _syncQuantityControllers() {
+    final activeColors = _availableColors.toSet();
+    for (final color in activeColors) {
+      _qtyCtrls.putIfAbsent(color, () => TextEditingController());
+    }
+
+    final staleColors = _qtyCtrls.keys
+        .where((color) => !activeColors.contains(color))
+        .toList();
+    for (final color in staleColors) {
+      _qtyCtrls.remove(color)?.dispose();
+      _selectedColors.remove(color);
+    }
+  }
+
+  int _qtyForColor(String color) {
+    return int.tryParse(_qtyCtrls[color]?.text.trim() ?? '') ?? 0;
+  }
+
+  int get _totalSelectedQty =>
+      _selectedColors.fold(0, (sum, color) => sum + _qtyForColor(color));
+
+  List<OrderItem> _selectedOrderItems() {
+    final items = <OrderItem>[];
+    for (final color in _availableColors) {
+      if (!_selectedColors.contains(color)) continue;
+      final qty = _qtyForColor(color);
+      if (qty <= 0) continue;
+      items.add(
+        OrderItem(
+          productId: widget.product.id,
+          productName: widget.product.name,
+          brand: _selectedBrand!,
+          color: color,
+          quantity: qty,
+          stockAvailable: false,
+        ),
+      );
+    }
+    return items;
+  }
+
   Future<void> _placeOrder() async {
-    if (_selectedColor == null) {
+    final items = _selectedOrderItems();
+    if (items.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Please select a color'),
+          content: Text('Select at least one color and enter quantity'),
           backgroundColor: AppTheme.dangerRed,
         ),
       );
@@ -972,16 +709,7 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       distributorCity: 'Maharashtra',
       orderDate: DateTime.now(),
       status: OrderStatus.pending,
-      items: [
-        OrderItem(
-          productId: widget.product.id,
-          productName: widget.product.name,
-          brand: _selectedBrand!,
-          color: _selectedColor!,
-          quantity: _qty,
-          stockAvailable: false,
-        ),
-      ],
+      items: items,
       remarks: _remarksCtrl.text.isEmpty ? null : _remarksCtrl.text,
     );
 
@@ -1125,70 +853,10 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
             ),
             const SizedBox(height: 20),
 
-            AppDropdown(
-              label: 'Brand',
-              value: _selectedBrand,
-              hint: 'Select brand',
-              items: _brandOptions.keys.toList(),
-              onChanged: (v) => setState(() {
-                _selectedBrand = v;
-                _selectedColor = null;
-              }),
-            ),
+            _brandChipSelector(),
             const SizedBox(height: 16),
 
-            const Text(
-              'Color',
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: AppTheme.textPrimary,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: _availableColors.map((c) {
-                final sel = _selectedColor == c;
-                return GestureDetector(
-                  onTap: () => setState(() => _selectedColor = c),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: sel ? AppTheme.primaryBlue : Colors.white,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: sel ? AppTheme.primaryBlue : AppTheme.borderGrey,
-                        width: sel ? 2 : 1,
-                      ),
-                    ),
-                    child: Text(
-                      c,
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: sel ? Colors.white : AppTheme.textPrimary,
-                      ),
-                    ),
-                  ),
-                );
-              }).toList(),
-            ),
-            const SizedBox(height: 20),
-
-            FormFieldWrapper(
-              label: 'Quantity (pieces)',
-              child: TextFormField(
-                controller: _qtyCtrl,
-                keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                onChanged: (v) => _qty = int.tryParse(v) ?? 0,
-              ),
-            ),
+            _detailColorQuantitySelector(),
             const SizedBox(height: 16),
 
             FormFieldWrapper(
@@ -1244,6 +912,196 @@ class _ProductDetailScreenState extends State<ProductDetailScreen> {
       default:
         return Icons.chair;
     }
+  }
+
+  Widget _brandChipSelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Brand',
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+            color: AppTheme.textPrimary,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: _brandOptions.keys.map((brand) {
+            final selected = _selectedBrand == brand;
+            return GestureDetector(
+              onTap: () => setState(() {
+                _selectedBrand = brand;
+                _selectedColors.clear();
+                _syncQuantityControllers();
+              }),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 13,
+                  vertical: 9,
+                ),
+                decoration: BoxDecoration(
+                  color: selected ? AppTheme.primaryBlue : Colors.white,
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(
+                    color: selected
+                        ? AppTheme.primaryBlue
+                        : AppTheme.borderGrey,
+                    width: selected ? 2 : 1,
+                  ),
+                ),
+                child: Text(
+                  brand,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    color: selected ? Colors.white : AppTheme.textPrimary,
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ],
+    );
+  }
+
+  Widget _detailColorQuantitySelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Colors & Quantity',
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+            color: AppTheme.textPrimary,
+          ),
+        ),
+        const SizedBox(height: 8),
+        ..._availableColors.map(_detailColorQuantityRow),
+        const SizedBox(height: 4),
+        Text(
+          _totalSelectedQty > 0
+              ? '${_selectedColors.length} color${_selectedColors.length == 1 ? '' : 's'} • $_totalSelectedQty pcs'
+              : 'Select colors and enter quantity',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            color: _totalSelectedQty > 0
+                ? AppTheme.successGreen
+                : AppTheme.textSecondary,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _detailColorQuantityRow(String color) {
+    final selected = _selectedColors.contains(color);
+    final controller = _qtyCtrls[color] ??= TextEditingController();
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      decoration: BoxDecoration(
+        color: selected ? AppTheme.chipBg : AppTheme.surfaceWhite,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: selected ? AppTheme.primaryBlue : AppTheme.borderGrey,
+        ),
+      ),
+      child: Row(
+        children: [
+          Checkbox(
+            value: selected,
+            visualDensity: VisualDensity.compact,
+            onChanged: (value) {
+              setState(() {
+                if (value == true) {
+                  _selectedColors.add(color);
+                } else {
+                  _selectedColors.remove(color);
+                }
+              });
+            },
+          ),
+          _detailColorDot(color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              color,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                color: AppTheme.textPrimary,
+              ),
+            ),
+          ),
+          SizedBox(
+            width: 92,
+            child: TextFormField(
+              controller: controller,
+              enabled: selected,
+              textAlign: TextAlign.center,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              decoration: const InputDecoration(
+                hintText: 'Qty',
+                contentPadding: EdgeInsets.symmetric(horizontal: 8),
+              ),
+              onChanged: (value) {
+                final qty = int.tryParse(value) ?? 0;
+                setState(() {
+                  if (qty > 0) {
+                    _selectedColors.add(color);
+                  } else {
+                    _selectedColors.remove(color);
+                  }
+                });
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _detailColorDot(String colorName) {
+    final colorMap = {
+      'BLACK': const Color(0xFF1A1A1A),
+      'BEIGE': const Color(0xFFF5E6C8),
+      'BISCUIT': const Color(0xFFD6B58A),
+      'BLUE': const Color(0xFF2563EB),
+      'BROWN': const Color(0xFF92400E),
+      'COFFEE': const Color(0xFF6F4E37),
+      'COPPER': const Color(0xFFB87333),
+      'GREEN': const Color(0xFF16A34A),
+      'GREY': const Color(0xFF9CA3AF),
+      'LB': const Color(0xFF60A5FA),
+      'METALIC': const Color(0xFF94A3B8),
+      'ORANGE': const Color(0xFFF97316),
+      'ORANGEWOOD': const Color(0xFFC26A2E),
+      'PINK': const Color(0xFFEC4899),
+      'RED': const Color(0xFFDC2626),
+      'ROSEWOOD': const Color(0xFF7F1D1D),
+      'SANDALWOOD': const Color(0xFFE7C79B),
+      'SILVER': const Color(0xFFC0C0C0),
+      'WHITE': const Color(0xFFF8FAFC),
+      'YELLOW': const Color(0xFFD97706),
+    };
+    return Container(
+      width: 12,
+      height: 12,
+      decoration: BoxDecoration(
+        color: colorMap[colorName.toUpperCase()] ?? AppTheme.textSecondary,
+        shape: BoxShape.circle,
+        border: Border.all(color: AppTheme.borderGrey, width: 0.5),
+      ),
+    );
   }
 }
 

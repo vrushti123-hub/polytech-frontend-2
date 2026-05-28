@@ -6,6 +6,7 @@ import 'package:image_picker/image_picker.dart';
 import '../../theme/app_theme.dart';
 import '../../models/models.dart';
 import '../../services/api_service.dart';
+import '../../utils/catalog_image_resolver.dart';
 import '../../widgets/widgets.dart';
 import '../production/production_home.dart';
 import 'package:intl/intl.dart';
@@ -47,13 +48,17 @@ class _DispatchHomeState extends State<DispatchHome>
     final challans = await challansFuture;
     if (mounted) {
       setState(() {
+        _challans = challans;
         for (final order in orders) {
-          if (_completedOrderIds.contains(order.id)) {
+          if (_isOrderFullyDispatched(order)) {
             order.status = OrderStatus.dispatched;
+            _completedOrderIds.add(order.id);
+          } else if (order.status == OrderStatus.dispatched) {
+            order.status = OrderStatus.partial;
+            _completedOrderIds.remove(order.id);
           }
         }
         _orders = orders;
-        _challans = challans;
         _loading = false;
         _refreshKey++;
       });
@@ -71,7 +76,30 @@ class _DispatchHomeState extends State<DispatchHome>
 
   bool _isDone(Order order) {
     return _completedOrderIds.contains(order.id) ||
-        order.status == OrderStatus.dispatched;
+        _isOrderFullyDispatched(order);
+  }
+
+  bool _sameOrderItem(OrderItem a, OrderItem b) {
+    return a.productId == b.productId &&
+        a.brand.toLowerCase() == b.brand.toLowerCase() &&
+        a.color.toLowerCase() == b.color.toLowerCase();
+  }
+
+  int _challanDispatchedQtyFor(Order order, OrderItem item) {
+    return _challans
+        .where((challan) => challan.orderId == order.id)
+        .expand((challan) => challan.items)
+        .where((challanItem) => _sameOrderItem(challanItem, item))
+        .fold<int>(0, (sum, challanItem) => sum + challanItem.quantity);
+  }
+
+  bool _isOrderFullyDispatched(Order order) {
+    if (order.items.isEmpty) return false;
+    return order.items.every((item) {
+      final challanQty = _challanDispatchedQtyFor(order, item);
+      final dispatchedQty = challanQty > 0 ? challanQty : item.dispatchedQty;
+      return dispatchedQty >= item.quantity;
+    });
   }
 
   DateTime _doneSortDate(Order order) {
@@ -86,13 +114,7 @@ class _DispatchHomeState extends State<DispatchHome>
 
   void _handleDispatchComplete(Order order, Challan challan) {
     setState(() {
-      if (order.status == OrderStatus.dispatched) {
-        _completedOrderIds.add(order.id);
-      } else {
-        _completedOrderIds.remove(order.id);
-      }
       final index = _orders.indexWhere((existing) => existing.id == order.id);
-      order.status = OrderStatus.dispatched;
       if (index != -1) {
         _orders[index] = order;
       } else {
@@ -100,9 +122,16 @@ class _DispatchHomeState extends State<DispatchHome>
       }
       _challans.removeWhere((existing) => existing.id == challan.id);
       _challans.add(challan);
+      if (_isOrderFullyDispatched(order)) {
+        order.status = OrderStatus.dispatched;
+        _completedOrderIds.add(order.id);
+      } else {
+        order.status = OrderStatus.partial;
+        _completedOrderIds.remove(order.id);
+      }
       _refreshKey++;
     });
-    _tabCtrl.animateTo(order.status == OrderStatus.dispatched ? 2 : 1);
+    _tabCtrl.animateTo(_isOrderFullyDispatched(order) ? 2 : 1);
   }
 
   void _showNotifications() {
@@ -582,40 +611,78 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
     await ApiService.checkOrderStock(widget.order.id);
     final updatedOrdersFuture = ApiService.getOrders();
     final challansFuture = ApiService.getChallans();
+    final inventoryFuture = ApiService.getInventory();
     final updatedOrders = await updatedOrdersFuture;
     final challans = await challansFuture;
+    final inventory = await inventoryFuture;
     final updatedOrder = updatedOrders
         .where((o) => o.id == widget.order.id)
         .firstOrNull;
     final orderChallans = challans
         .where((challan) => challan.orderId == widget.order.id)
         .toList();
-    if (updatedOrder != null && mounted) {
-      setState(() {
-        for (int i = 0; i < widget.order.items.length; i++) {
-          if (i < updatedOrder.items.length) {
-            widget.order.items[i].stockAvailable =
-                updatedOrder.items[i].stockAvailable;
-          }
+
+    if (!mounted) return;
+
+    setState(() {
+      _orderChallans = orderChallans;
+
+      for (final item in widget.order.items) {
+        final updatedItem = updatedOrder?.items.where((other) {
+          return _sameItem(other, item);
+        }).firstOrNull;
+        if (updatedItem != null) {
+          item.dispatchedQty = updatedItem.dispatchedQty;
+          item.dispatchHistory = List<int>.from(updatedItem.dispatchHistory);
         }
-        _orderChallans = orderChallans;
-        _checkingStock = false;
-      });
-    } else {
-      if (mounted) {
-        setState(() {
-          _orderChallans = orderChallans;
-          _checkingStock = false;
-        });
+
+        final dispatchedQty = _dispatchedQtyFor(item);
+        final pendingQty = item.quantity - dispatchedQty;
+        final availableStock = _stockForItem(inventory, item);
+        item.stockAvailable = pendingQty <= 0 || availableStock >= pendingQty;
       }
-    }
+
+      if (updatedOrder != null) widget.order.status = updatedOrder.status;
+      _checkingStock = false;
+    });
+  }
+
+  int _stockForItem(List<InventoryItem> inventory, OrderItem item) {
+    return inventory
+        .where((stock) => _sameInventoryItem(stock, item))
+        .fold(0, (sum, stock) => sum + stock.currentStock);
+  }
+
+  bool _sameInventoryItem(InventoryItem stock, OrderItem item) {
+    final sameVariant =
+        stock.brand.toLowerCase() == item.brand.toLowerCase() &&
+        stock.color.toLowerCase() == item.color.toLowerCase();
+    if (!sameVariant) return false;
+
+    if (stock.productId == item.productId) return true;
+
+    return _normalizedProductName(stock.productName) ==
+        _normalizedProductName(item.productName);
+  }
+
+  String _normalizedProductName(String value) {
+    return value
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s*\([^)]*\)\s*'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
   }
 
   void _applyCompletedChallan(Challan challan) {
     setState(() {
-      widget.order.status = OrderStatus.dispatched;
       _orderChallans.removeWhere((existing) => existing.id == challan.id);
       _orderChallans.add(challan);
+      final isFullyDispatched = widget.order.items.every(
+        (item) => _dispatchedQtyFor(item) >= item.quantity,
+      );
+      widget.order.status = isFullyDispatched
+          ? OrderStatus.dispatched
+          : OrderStatus.partial;
     });
     widget.onDispatchComplete?.call(widget.order, challan);
   }
@@ -776,6 +843,20 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
         .reduce((latest, date) => date.isAfter(latest) ? date : latest);
   }
 
+  Future<void> _goToProductionForItem(OrderItem item) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ProductionHome(
+          initialProductId: item.productId,
+          initialBrand: item.brand,
+          initialColor: item.color,
+        ),
+      ),
+    );
+    if (mounted) _checkStock();
+  }
+
   @override
   Widget build(BuildContext context) {
     final o = widget.order;
@@ -795,6 +876,12 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
         break;
     }
     final fmt = DateFormat('dd MMM yyyy, hh:mm a');
+    final standaloneItems = _orderChallans.isEmpty
+        ? o.items
+        : o.items.where((item) {
+            final dispatchedQty = _dispatchedQtyFor(item);
+            return dispatchedQty < item.quantity || !item.stockAvailable;
+          }).toList();
 
     return Scaffold(
       appBar: AppBar(title: Text(o.id), actions: const [AppLogoutButton()]),
@@ -865,19 +952,29 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
                     ..._orderChallans.map(
                       (challan) => _DispatchTruckPhotoCard(
                         challan: challan,
+                        orderItems: o.items,
                         onUploadPhoto: () => _uploadPhotoForChallan(challan),
                       ),
                     ),
                     const SizedBox(height: 6),
                   ],
 
-                  ...o.items.map(
-                    (item) => _DispatchItemCard(
-                      item: item,
-                      dispatchedQty: _dispatchedQtyFor(item),
-                      dispatches: _dispatchesForItem(item),
+                  if (standaloneItems.isNotEmpty) ...[
+                    if (_orderChallans.isNotEmpty) ...[
+                      const SectionHeader(title: 'Pending Products'),
+                      const SizedBox(height: 10),
+                    ],
+                    ...standaloneItems.map(
+                      (item) => _DispatchItemCard(
+                        item: item,
+                        dispatchedQty: _dispatchedQtyFor(item),
+                        dispatches: _dispatchesForItem(item),
+                        onProductionEntry: item.stockAvailable
+                            ? null
+                            : () => _goToProductionForItem(item),
+                      ),
                     ),
-                  ),
+                  ],
                   const SizedBox(height: 16),
 
                   Container(
@@ -1000,27 +1097,6 @@ class _DispatchOrderDetailState extends State<DispatchOrderDetail> {
                           ],
                         ),
                       ),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                        width: double.infinity,
-                        height: 50,
-                        child: OutlinedButton.icon(
-                          onPressed: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => const ProductionHome(),
-                            ),
-                          ).then((_) => _checkStock()),
-                          icon: const Icon(Icons.factory_outlined),
-                          label: const Text(
-                            'Go to Production Entry',
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                      ),
                     ] else ...[
                       SizedBox(
                         width: double.infinity,
@@ -1112,11 +1188,13 @@ class _DispatchItemCard extends StatelessWidget {
   final OrderItem item;
   final int dispatchedQty;
   final List<_ItemDispatchEntry> dispatches;
+  final VoidCallback? onProductionEntry;
 
   const _DispatchItemCard({
     required this.item,
     required this.dispatchedQty,
     required this.dispatches,
+    this.onProductionEntry,
   });
 
   @override
@@ -1204,6 +1282,17 @@ class _DispatchItemCard extends StatelessWidget {
                       );
                     }),
                   ),
+                if (onProductionEntry != null) ...[
+                  const SizedBox(height: 10),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: OutlinedButton.icon(
+                      onPressed: onProductionEntry,
+                      icon: const Icon(Icons.factory_outlined, size: 16),
+                      label: const Text('Go to Production Entry'),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1241,12 +1330,27 @@ class _ItemDispatchEntry {
 
 class _DispatchTruckPhotoCard extends StatelessWidget {
   final Challan challan;
+  final List<OrderItem> orderItems;
   final VoidCallback onUploadPhoto;
 
   const _DispatchTruckPhotoCard({
     required this.challan,
+    required this.orderItems,
     required this.onUploadPhoto,
   });
+
+  bool _sameItem(OrderItem a, OrderItem b) {
+    return a.productId == b.productId &&
+        a.brand.toLowerCase() == b.brand.toLowerCase() &&
+        a.color.toLowerCase() == b.color.toLowerCase();
+  }
+
+  int _orderedQtyFor(OrderItem challanItem) {
+    for (final orderItem in orderItems) {
+      if (_sameItem(orderItem, challanItem)) return orderItem.quantity;
+    }
+    return challanItem.quantity;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1350,7 +1454,134 @@ class _DispatchTruckPhotoCard extends StatelessWidget {
                 _DispatchDetailRow('Vehicle Number', challan.vehicleNumber),
                 _DispatchDetailRow('Driver Name', challan.driverName),
                 _DispatchDetailRow('Driver Phone', challan.driverPhone),
+                if (challan.items.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  const Divider(height: 1, color: AppTheme.borderGrey),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Products in this truck',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      color: AppTheme.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ...challan.items.map(
+                    (item) => _ChallanProductRow(
+                      item: item,
+                      orderedQuantity: _orderedQtyFor(item),
+                      dispatchDate: challan.dispatchDate,
+                    ),
+                  ),
+                ],
               ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ChallanProductRow extends StatelessWidget {
+  final OrderItem item;
+  final int orderedQuantity;
+  final DateTime dispatchDate;
+
+  const _ChallanProductRow({
+    required this.item,
+    required this.orderedQuantity,
+    required this.dispatchDate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final imagePath = CatalogImageResolver.forOrderItem(item);
+    final fmt = DateFormat('dd MMM yyyy, hh:mm a');
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: AppTheme.surfaceWhite,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppTheme.borderGrey),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: AppTheme.chipBg,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: AppTheme.borderGrey),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: imagePath == null
+                ? const Icon(
+                    Icons.inventory_2_outlined,
+                    color: AppTheme.primaryBlue,
+                    size: 22,
+                  )
+                : Image.asset(
+                    imagePath,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const Icon(
+                      Icons.inventory_2_outlined,
+                      color: AppTheme.primaryBlue,
+                      size: 22,
+                    ),
+                  ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  item.productName,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+                Text(
+                  '${item.brand} • ${item.color}',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Ordered: $orderedQuantity pcs • Final dispatched: ${item.quantity} pcs',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: AppTheme.warningAmber,
+                  ),
+                ),
+                Text(
+                  'Dispatched: ${fmt.format(dispatchDate)}',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            '${item.quantity} pcs',
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+              color: AppTheme.successGreen,
             ),
           ),
         ],
@@ -1785,10 +2016,15 @@ class _ChallanScreenState extends State<ChallanScreen> {
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
             ),
             const SizedBox(height: 6),
-            const Text(
-              'Order marked as dispatched.\nChallan generated.',
+            Text(
+              isFullyDispatched
+                  ? 'Order marked as dispatched.\nChallan generated.'
+                  : 'Partial dispatch saved.\nChallan generated.',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: AppTheme.textSecondary),
+              style: const TextStyle(
+                fontSize: 13,
+                color: AppTheme.textSecondary,
+              ),
             ),
           ],
         ),
